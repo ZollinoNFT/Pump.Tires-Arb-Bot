@@ -68,6 +68,10 @@ contract PumpTiresArbitrage is Ownable, ReentrancyGuard {
 	mapping(address => bool) public tokenApprovedOnce; // avoid repeated approvals
 	mapping(address => address) public tokenCreator;   // optional: set via bot
 
+	// --- Slippage config
+	uint256 public buyMinOut;      // defaults to 1 (extreme slippage)
+	uint256 public sellMinEthOut;  // defaults to 1
+
 	// --- Events
 	event WhitelistAdded(address indexed account);
 	event WhitelistRemoved(address indexed account);
@@ -78,6 +82,8 @@ contract PumpTiresArbitrage is Ownable, ReentrancyGuard {
 	event PLSRetrieved(address indexed to, uint256 amount);
 	event TokensRescued(address indexed token, address indexed to, uint256 amount);
 	event CallFailure(string context, bytes data);
+	/// Slippage updates
+	event SlippageUpdated(uint256 buyMinOut, uint256 sellMinEthOut);
 
 	// --- Selectors (precomputed)
 	bytes4 private constant SELECTOR_TOKENS = 0xe4860339; // tokens(address) -> bool
@@ -94,6 +100,8 @@ contract PumpTiresArbitrage is Ownable, ReentrancyGuard {
 		require(pump != address(0), "PUMP_ZERO");
 		PUMP = pump;
 		isWhitelisted[msg.sender] = true; // deployer auto-whitelisted
+		buyMinOut = 1;
+		sellMinEthOut = 1;
 		emit WhitelistAdded(msg.sender);
 	}
 
@@ -109,6 +117,13 @@ contract PumpTiresArbitrage is Ownable, ReentrancyGuard {
 	function removeFromWhitelist(address account) external onlyOwner {
 		isWhitelisted[account] = false;
 		emit WhitelistRemoved(account);
+	}
+
+	function setSlippage(uint256 newBuyMinOut, uint256 newSellMinEthOut) external onlyOwner {
+		// allow 0 if desired, but keep <= type(uint256).max
+		buyMinOut = newBuyMinOut;
+		sellMinEthOut = newSellMinEthOut;
+		emit SlippageUpdated(newBuyMinOut, newSellMinEthOut);
 	}
 
 	function recordTokenCreator(address token, address dev) external onlyWhitelisted {
@@ -141,7 +156,7 @@ contract PumpTiresArbitrage is Ownable, ReentrancyGuard {
 		require(tokenListed(token), "NOT_LISTED");
 
 		// Execute buy: assume signature buyToken(address token, uint256 amountIn, uint256 minOut)
-		(bool ok, bytes memory ret) = PUMP.call{value: buyAmountPls}(abi.encodeWithSelector(SELECTOR_BUY_RAW, token, buyAmountPls, uint256(1)));
+		(bool ok, bytes memory ret) = PUMP.call{value: buyAmountPls}(abi.encodeWithSelector(SELECTOR_BUY_RAW, token, buyAmountPls, buyMinOut));
 		if (!ok) {
 			emit CallFailure("buy", ret);
 			revert("BUY_FAIL");
@@ -161,7 +176,7 @@ contract PumpTiresArbitrage is Ownable, ReentrancyGuard {
 		require(token != address(0), "TOKEN_ZERO");
 		uint256 bal = SafeTransfer.safeBalanceOf(IERC20(token), address(this));
 		require(bal > 0, "NO_BAL");
-		(bytes memory callData) = abi.encodeWithSelector(SELECTOR_SELL_TOKEN, token, bal, uint256(1));
+		(bytes memory callData) = abi.encodeWithSelector(SELECTOR_SELL_TOKEN, token, bal, sellMinEthOut);
 		(bool ok, bytes memory ret) = PUMP.call(callData);
 		if (!ok) {
 			emit CallFailure("sell", ret);
