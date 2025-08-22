@@ -86,10 +86,10 @@ contract PumpTiresArbitrage is Ownable, ReentrancyGuard {
 	event SlippageUpdated(uint256 buyMinOut, uint256 sellMinEthOut);
 
 	// --- Selectors (precomputed)
-	bytes4 private constant SELECTOR_TOKENS = 0xe4860339; // tokens(address) -> bool
+	bytes4 private constant SELECTOR_TOKENS = 0xe4860339; // tokens(address) -> address (dev EOA)
 	bytes4 private constant SELECTOR_GET_SELL_OUT = 0xbbf1fed1; // getSellAmountOut(address,uint256)
 	bytes4 private constant SELECTOR_SELL_TOKEN = 0x3e11741f; // sellToken(address,uint256,uint256)
-	bytes4 private constant SELECTOR_BUY_RAW = 0x58bbe38e;    // assumed: buyToken(address,uint256,uint256)
+	bytes4 private constant SELECTOR_BUY_RAW = 0x58bbe38e;    // buy(address,uint256 minTokensOut)
 
 	modifier onlyWhitelisted() {
 		require(isWhitelisted[msg.sender] || msg.sender == owner, "NOT_ALLOWED");
@@ -142,21 +142,29 @@ contract PumpTiresArbitrage is Ownable, ReentrancyGuard {
 	function tokenListed(address token) public view returns (bool listed) {
 		(bool s, bytes memory r) = PUMP.staticcall(abi.encodeWithSelector(SELECTOR_TOKENS, token));
 		if (!s || r.length < 32) return false;
-		listed = abi.decode(r, (bool));
+		address dev = abi.decode(r, (address));
+		listed = (dev != address(0));
 	}
 
 	// --- Trading
 	/// @notice Buys a token via the Pump.Tires contract using raw selector 0x58bbe38e.
-	/// Expects `msg.value == buyAmountPls`. Sets extreme slippage (minOut=1).
+	/// Expects `msg.value == buyAmountPls`. Uses configurable min token out (buyMinOut).
 	function buyToken(address token, uint256 buyAmountPls) external payable onlyWhitelisted nonReentrant {
 		require(token != address(0), "TOKEN_ZERO");
 		require(msg.value == buyAmountPls && buyAmountPls > 0, "BAD_VALUE");
 
-		// Optionally verify token is listed
-		require(tokenListed(token), "NOT_LISTED");
+		// Fetch dev EOA from Pump and ensure token is registered
+		(bool st, bytes memory rt) = PUMP.staticcall(abi.encodeWithSelector(SELECTOR_TOKENS, token));
+		require(st && rt.length >= 32, "TOKENS_CALL_FAIL");
+		address dev = abi.decode(rt, (address));
+		require(dev != address(0), "NOT_LISTED");
+		if (tokenCreator[token] == address(0)) {
+			tokenCreator[token] = dev;
+			emit DevEOARecorded(token, dev);
+		}
 
-		// Execute buy: assume signature buyToken(address token, uint256 amountIn, uint256 minOut)
-		(bool ok, bytes memory ret) = PUMP.call{value: buyAmountPls}(abi.encodeWithSelector(SELECTOR_BUY_RAW, token, buyAmountPls, buyMinOut));
+		// Execute buy: signature buy(address token, uint256 minTokensOut)
+		(bool ok, bytes memory ret) = PUMP.call{value: buyAmountPls}(abi.encodeWithSelector(SELECTOR_BUY_RAW, token, buyMinOut));
 		if (!ok) {
 			emit CallFailure("buy", ret);
 			revert("BUY_FAIL");
